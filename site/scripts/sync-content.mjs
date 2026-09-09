@@ -53,6 +53,8 @@ export const fileMap = {
   },
   "docs/proxy-setup.md": { path: "sources/proxy-setup", order: 4, title: "Real client IP behind a proxy" },
   "docs/deployment.md": { path: "operate/deployment", order: 4, title: "Deployment" },
+  "docs/external-database.md": { path: "operate/external-database", order: 5, title: "External database" },
+  "docs/kubernetes.md": { path: "operate/kubernetes", order: 6, title: "Kubernetes" },
   "docs/api-conventions.md": { path: "reference/api-conventions", order: 2, title: "API conventions" },
   "CHANGELOG.md": { path: "reference/changelog", order: 3, title: "Changelog" },
   "SECURITY.md": { path: "reference/security", order: 4, title: "Security policy" },
@@ -108,11 +110,21 @@ export function rewriteLinks(md, ctx) {
     if (/^(https?:)?\/\//.test(target) || target.startsWith("mailto:")) return whole;
     const shots = target.match(/^\/?data\/screenshots\/([^#]+)$/);
     if (shots) return `](../../../../assets/screenshots/${shots[1]})`;
-    const doc = target.match(/^\/?docs\/([a-z-]+)\.md(#.*)?$/);
+    // The docs/ prefix is optional: the README links from the repo root,
+    // one docs page links to another as a sibling.
+    const doc = target.match(/^(?:\/?docs\/)?([a-z-]+)\.md(#.*)?$/);
     if (doc) {
       const entry = fileMap[`docs/${doc[1]}.md`];
       if (!entry) throw new Error(`No docs page for ${target}`);
       return `](/docs/${entry.path}/${doc[2] ?? ""})`;
+    }
+    // A docs page pointing back at a README section, which the site split
+    // into a page of its own.
+    const readme = target.match(/^\.\.\/README\.md#(.+)$/);
+    if (readme) {
+      const dest = ctx.anchors[readme[1]];
+      if (!dest) throw new Error(`Unknown README anchor #${readme[1]}`);
+      return `](${dest})`;
     }
     const top = target.match(/^\/?(CHANGELOG|SECURITY)\.md(#.*)?$/);
     if (top) return `](/docs/${fileMap[`${top[1]}.md`].path}/${top[2] ?? ""})`;

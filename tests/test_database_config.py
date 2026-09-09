@@ -153,14 +153,25 @@ def test_bare_modes_are_handed_to_asyncpg_verbatim(monkeypatch, mode):
 
 def test_verify_full_without_ca_file_uses_the_system_trust_store(monkeypatch):
     """Managed providers present publicly signed certificates; asyncpg alone
-    would insist on ~/.postgresql/root.crt."""
+    would insist on ~/.postgresql/root.crt.
+
+    Asserted through the call, not through get_ca_certs(): where OpenSSL
+    loads the system store from a hashed directory it stays empty until a
+    handshake looks a certificate up.
+    """
+    loaded: list[ssl.Purpose] = []
+    monkeypatch.setattr(
+        ssl.SSLContext,
+        "load_default_certs",
+        lambda self, purpose=ssl.Purpose.SERVER_AUTH: loaded.append(purpose),
+    )
     monkeypatch.setenv("DB_SSLMODE", "verify-full")
     context = _settings().ssl_argument
 
     assert isinstance(context, ssl.SSLContext)
     assert context.check_hostname is True
     assert context.verify_mode is ssl.CERT_REQUIRED
-    assert context.get_ca_certs()  # system CAs actually loaded
+    assert loaded == [ssl.Purpose.SERVER_AUTH]
 
 
 def test_verify_ca_does_not_check_the_hostname(monkeypatch, ca_file: Path):
