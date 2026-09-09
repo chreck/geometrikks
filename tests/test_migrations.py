@@ -136,7 +136,7 @@ def migration_mocks(monkeypatch):
 
     order: list[str] = []
     monkeypatch.setattr(
-        mod, "upgrade_to_head", lambda database_url=None: order.append("upgrade")
+        mod, "upgrade_to_head", lambda database_url=None, connect_args=None: order.append("upgrade")
     )
 
     async def fake_teardown(conn) -> None:
@@ -186,7 +186,7 @@ async def test_no_drop_flag_goes_straight_to_upgrade(migration_mocks) -> None:
 async def test_upgrade_failure_propagates(monkeypatch) -> None:
     from geometrikks.server import migrations as mod
 
-    def boom(database_url=None) -> None:
+    def boom(database_url=None, connect_args=None) -> None:
         raise RuntimeError("broken migration")
 
     monkeypatch.setattr(mod, "upgrade_to_head", boom)

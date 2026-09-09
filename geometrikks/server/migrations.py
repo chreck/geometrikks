@@ -7,10 +7,10 @@ time — everything happens inside the functions.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from advanced_alchemy.alembic.commands import AlembicCommands
-from advanced_alchemy.config import AlembicAsyncConfig, SQLAlchemyAsyncConfig
+from advanced_alchemy.config import AlembicAsyncConfig, EngineConfig, SQLAlchemyAsyncConfig
 from advanced_alchemy import base
 from sqlalchemy import text
 
@@ -26,17 +26,25 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def upgrade_to_head(database_url: str | None = None) -> None:
+def upgrade_to_head(
+    database_url: str | None = None, connect_args: dict[str, Any] | None = None
+) -> None:
     """Run ``alembic upgrade head`` synchronously; call via asyncio.to_thread().
 
     Builds a dedicated migration config from the given URL (falling back to
     ambient settings) instead of reusing the app engine: alembic's env.py
     starts its own event loop (asyncio.run), and sharing the app engine
     would let connections bound to that throwaway loop land back in the
-    app's pool.
+    app's pool. ``connect_args`` carries the TLS and startup parameters the
+    URL deliberately leaves out; without them a migration against an
+    external, TLS-only database is refused while the app itself connects.
     """
+    settings = get_settings()
     config = SQLAlchemyAsyncConfig(
-        connection_string=database_url or get_settings().database.url,
+        connection_string=database_url or settings.database.url,
+        engine_config=EngineConfig(
+            connect_args=connect_args if connect_args is not None else settings.database.connect_args
+        ),
         alembic_config=AlembicAsyncConfig(
             script_config="alembic.ini",
             script_location="migrations",
@@ -69,4 +77,6 @@ async def migrate_database(engine: AsyncEngine, settings: Settings) -> None:
                 "development).",
                 settings.environment,
             )
-    await asyncio.to_thread(upgrade_to_head, settings.database.url)
+    await asyncio.to_thread(
+        upgrade_to_head, settings.database.url, settings.database.connect_args
+    )

@@ -11,10 +11,11 @@ import asyncio
 import contextlib
 import platform
 import shutil
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import asyncpg
 from litestar.channels import ChannelsPlugin
 from litestar.channels.backends.asyncpg import AsyncPgChannelsBackend
 from litestar.middleware.logging import LoggingMiddlewareConfig
@@ -66,6 +67,7 @@ def create_sqlalchemy_config(settings: Settings) -> SQLAlchemyAsyncConfig:
         pool_pre_ping=settings.database.pool_pre_ping,
         pool_use_lifo=True,  # use lifo to reduce the number of idle connections
         poolclass=NullPool if settings.database.pool_disabled else None,
+        connect_args=settings.database.connect_args,
     )
     return SQLAlchemyAsyncConfig(
         engine_instance=engine,
@@ -376,14 +378,25 @@ class DegradedTolerantAsyncPgBackend(AsyncPgChannelsBackend):
             yield item
 
 
+def create_channels_backend(settings: Settings) -> DegradedTolerantAsyncPgBackend:
+    """LISTEN/NOTIFY backend on the same connection parameters as the engine.
+
+    make_connection rather than dsn: TLS and startup parameters live in
+    connect_args, and only asyncpg.connect() takes those alongside a DSN.
+    """
+    return DegradedTolerantAsyncPgBackend(
+        make_connection=partial(
+            asyncpg.connect, dsn=settings.database.asyncpg_dsn, **settings.database.connect_args
+        )
+    )
+
+
 def create_channels_plugin(
     settings: Settings, backend: DegradedTolerantAsyncPgBackend | None = None
 ) -> ChannelsPlugin:
     """Cross-process live-events fan-out over Postgres LISTEN/NOTIFY."""
     return ChannelsPlugin(
-        backend=(
-            backend if backend is not None else DegradedTolerantAsyncPgBackend(dsn=settings.database.asyncpg_dsn)
-        ),
+        backend=backend if backend is not None else create_channels_backend(settings),
         channels=[LIVE_EVENTS_CHANNEL],
         arbitrary_channels_allowed=False,
         subscriber_max_backlog=1000,
@@ -436,7 +449,7 @@ def create_plugins(
     ]
     if include_vite:
         plugin_list.append(VitePlugin(config=create_vite_config(settings)))
-    channels_backend = DegradedTolerantAsyncPgBackend(dsn=settings.database.asyncpg_dsn)
+    channels_backend = create_channels_backend(settings)
     plugin_list.extend(
         [
             ImportLogsCLIPlugin(),

@@ -1,16 +1,19 @@
 import json
 import os
 import socket
+import ssl
 import warnings
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version as distribution_version
-from ipaddress import ip_network
+from ipaddress import ip_address, ip_network
 from pathlib import Path
-from typing import Annotated, Literal
-from urllib.parse import quote
+from typing import Annotated, Any, Literal
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic_settings import NoDecode, SettingsConfigDict
+
+from geometrikks.config.sources import EnvOrFileSettings
 from geometrikks.services.logparser.constants import ALLOWED_GEOIP_LOCALES
 
 
@@ -39,14 +42,107 @@ def get_installed_version() -> str:
         return "unknown"
 
 
-class DatabaseSettings(BaseSettings):
+SSL_MODES = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")
+SSLMode = Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
+
+# libpq connection-string parameters that map onto a DatabaseSettings field.
+# Anything else in the query becomes a PostgreSQL startup parameter, which is
+# what asyncpg does with the leftovers of a DSN it parses itself.
+_DSN_SSL_PARAMS = {
+    "sslmode": "sslmode",
+    "ssl": "sslmode",
+    "sslrootcert": "sslrootcert",
+    "sslcert": "sslcert",
+    "sslkey": "sslkey",
+    "sslpassword": "sslpassword",
+}
+_DSN_SCHEMES = ("postgresql", "postgres", "postgresql+asyncpg")
+
+
+def _url_host(host: str) -> str:
+    """Bracket a bare IPv6 address so the URL stays parseable."""
+    try:
+        return f"[{host}]" if ip_address(host).version == 6 else host
+    except ValueError:
+        return host
+
+
+def _parse_connection_string(dsn: str, server_settings: Any) -> dict[str, Any]:
+    """Turn a libpq connection string into DatabaseSettings field values.
+
+    Keeps close to what asyncpg does with a DSN of its own: the ssl
+    parameters configure TLS, and every remaining query parameter becomes a
+    PostgreSQL startup parameter. Explicit DB_SERVER_SETTINGS entries win
+    over the ones carried by the string.
+    """
+    parsed = urlsplit(dsn.strip())
+    # Never echo the string itself: it carries the password.
+    location = parsed.hostname or "the configured host"
+    if parsed.scheme.lower() not in _DSN_SCHEMES:
+        raise ValueError(
+            f"DB_CONNECTION_STRING must start with postgresql:// (got {parsed.scheme or 'no'} "
+            "scheme). GeoMetrikks stores its traffic history in PostgreSQL/TimescaleDB; "
+            "no other engine is supported."
+        )
+
+    fields: dict[str, Any] = {}
+    extra: dict[str, str] = {}
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        key = key.lower()
+        if key in _DSN_SSL_PARAMS:
+            fields[_DSN_SSL_PARAMS[key]] = value
+        elif key in ("dbname", "database"):
+            fields["database"] = value
+        elif key in ("host", "port", "user", "password"):
+            fields[key] = value
+        else:
+            extra[key] = value
+
+    if parsed.hostname:
+        fields["host"] = parsed.hostname
+    try:
+        if parsed.port:
+            fields["port"] = parsed.port
+    except ValueError as exc:  # a port that is not a number
+        raise ValueError(f"DB_CONNECTION_STRING for {location} has an invalid port") from exc
+    if parsed.username:
+        fields["user"] = unquote(parsed.username)
+    if parsed.password is not None:
+        fields["password"] = unquote(parsed.password)
+    name = parsed.path.lstrip("/")
+    if name:
+        fields["database"] = unquote(name)
+
+    if str(fields.get("host", "")).startswith("/"):
+        raise ValueError(
+            "DB_CONNECTION_STRING points at a Unix socket; GeoMetrikks connects over "
+            "TCP only. Use a host name or address."
+        )
+    if fields.get("sslmode") and fields["sslmode"] not in SSL_MODES:
+        raise ValueError(
+            f"DB_CONNECTION_STRING for {location} has sslmode={fields['sslmode']!r}; "
+            f"expected one of: {', '.join(SSL_MODES)}"
+        )
+
+    if extra:
+        explicit = json.loads(server_settings) if isinstance(server_settings, str) else (server_settings or {})
+        fields["server_settings"] = {**extra, **explicit}
+    return fields
+
+
+class DatabaseSettings(EnvOrFileSettings):
     """Database configuration settings.
-    
+
     PostgreSQL with PostGIS is required for this application due to
     GeoAlchemy2 spatial features and high-volume log ingestion.
     """
 
-    model_config = SettingsConfigDict(env_prefix="DB_", env_file=_env_file(), extra="ignore")
+    # populate_by_name: DB_CONNECTION_STRING/DATABASE_URL are alias-only env
+    # names, and _expand_connection_string writes the components it parses
+    # back under their field names.
+    model_config = SettingsConfigDict(
+        env_prefix="DB_", env_file=_env_file(), extra="ignore", populate_by_name=True
+    )
 
     echo: bool = Field(default=False, description="Enable SQLAlchemy query logging")
     echo_pool: bool = Field(default=False, description="Enable SQLAlchemy pool logging")
@@ -61,6 +157,52 @@ class DatabaseSettings(BaseSettings):
     host: str = Field(default="localhost", description="Database host")
     port: int = Field(default=5432, description="Database port")
     database: str = Field(default="geometrikks", description="Database name")
+    connection_string: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DB_CONNECTION_STRING", "DATABASE_URL"),
+        description=(
+            "Complete PostgreSQL connection string, e.g. "
+            "postgresql://user:pass@db.example.com:5432/geometrikks?sslmode=require "
+            "(DATABASE_URL is accepted as well). Every component it carries wins "
+            "over the matching DB_* variable; libpq ssl parameters in the query "
+            "populate the DB_SSL* settings and anything else becomes a "
+            "PostgreSQL startup parameter."
+        ),
+    )
+    sslmode: SSLMode | None = Field(
+        default=None,
+        description=(
+            "libpq TLS mode: disable, allow, prefer, require, verify-ca or "
+            "verify-full. Unset means prefer (TLS when the server offers it, "
+            "without verification). verify-ca and verify-full check the server "
+            "certificate against DB_SSLROOTCERT, or the system trust store when "
+            "no CA file is configured."
+        ),
+    )
+    sslrootcert: Path | None = Field(
+        default=None,
+        description="Path to the CA certificate that signs the server certificate",
+    )
+    sslcert: Path | None = Field(
+        default=None,
+        description="Path to the client certificate for certificate authentication",
+    )
+    sslkey: Path | None = Field(
+        default=None,
+        description="Path to the private key belonging to DB_SSLCERT",
+    )
+    sslpassword: SecretStr | None = Field(
+        default=None,
+        description="Passphrase protecting DB_SSLKEY, if it is encrypted",
+    )
+    server_settings: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            'PostgreSQL startup parameters as a JSON object, e.g. '
+            '{"application_name": "geometrikks"}. Unrecognised query parameters '
+            "of DB_CONNECTION_STRING are merged in; explicit entries win."
+        ),
+    )
     drop_on_startup: bool = Field(default=False, description="Drop all tables on startup (development only)")
     migrate_on_startup: bool = Field(
         default=True,
@@ -81,17 +223,61 @@ class DatabaseSettings(BaseSettings):
         ),
     )
     
+    @model_validator(mode="before")
+    @classmethod
+    def _expand_connection_string(cls, data: Any) -> Any:
+        """Split DB_CONNECTION_STRING into the fields the rest of the app reads.
+
+        Expanding before validation (instead of after) means the components
+        go through the normal field validation, and the settings API, the
+        Status page and every log line show the address actually in use
+        rather than an opaque URL.
+
+        The string wins over the individual variables for everything it
+        carries: it is one atomic address, and a deployment that sets it
+        should not have to unset the DB_HOST an image or compose file
+        already provides.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw: Any = None
+        for key in ("connection_string", "DB_CONNECTION_STRING", "DATABASE_URL"):
+            if data.get(key) is not None:
+                raw = data.pop(key)
+            else:
+                data.pop(key, None)
+        if raw is None:
+            return data
+        dsn = raw.get_secret_value() if isinstance(raw, SecretStr) else str(raw)
+        data["connection_string"] = dsn
+        data.update(_parse_connection_string(dsn, data.get("server_settings")))
+        return data
+
+    @model_validator(mode="after")
+    def _validate_tls_material(self) -> "DatabaseSettings":
+        """Fail on TLS settings that cannot produce a working connection."""
+        if self.sslkey is not None and self.sslcert is None:
+            raise ValueError("DB_SSLKEY needs DB_SSLCERT: a client key without its certificate is unusable")
+        for label, path in (("DB_SSLROOTCERT", self.sslrootcert), ("DB_SSLCERT", self.sslcert), ("DB_SSLKEY", self.sslkey)):
+            if path is not None and not path.is_file():
+                raise ValueError(f"{label}: certificate file not found: {path}")
+        return self
+
     @property
     def url(self) -> str:
         """Construct the database URL from components.
 
         Credentials are percent-encoded: reserved URL characters in the
-        user or password (@, :, /, %) would otherwise break the URL.
+        user or password (@, :, /, %) would otherwise break the URL. TLS
+        and startup parameters stay out of the URL and travel through
+        ``connect_args`` instead, because SQLAlchemy hands query parameters
+        to asyncpg as keyword arguments, which knows ``ssl`` but none of
+        libpq's ``ssl*`` spellings.
         """
         return (
             f"postgresql+asyncpg://{quote(self.user, safe='')}:"
             f"{quote(self.password.get_secret_value(), safe='')}"
-            f"@{self.host}:{self.port}/{self.database}"
+            f"@{_url_host(self.host)}:{self.port}/{quote(self.database, safe='')}"
         )
 
     @property
@@ -102,6 +288,67 @@ class DatabaseSettings(BaseSettings):
         not understand SQLAlchemy's +asyncpg driver suffix.
         """
         return self.url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    @property
+    def connect_args(self) -> dict[str, Any]:
+        """asyncpg connect kwargs shared by the engine and the channels backend.
+
+        Both connect to the same server, so TLS and startup parameters are
+        resolved once here instead of once per URL spelling.
+        """
+        args: dict[str, Any] = {}
+        ssl_argument = self.ssl_argument
+        if ssl_argument is not None:
+            args["ssl"] = ssl_argument
+        if self.server_settings:
+            args["server_settings"] = dict(self.server_settings)
+        return args
+
+    @property
+    def ssl_argument(self) -> ssl.SSLContext | str | bool | None:
+        """asyncpg's ``ssl`` argument for the configured mode.
+
+        Bare modes are passed through as strings so asyncpg applies libpq's
+        own semantics. A context is only built when certificate files are
+        involved, or for verify-ca/verify-full without a CA file: asyncpg
+        would then insist on ~/.postgresql/root.crt, while a managed
+        provider's publicly signed certificate verifies against the system
+        trust store.
+        """
+        certs_configured = any((self.sslrootcert, self.sslcert, self.sslkey))
+        if self.sslmode is None and not certs_configured:
+            return None  # asyncpg's default: prefer, i.e. TLS when offered
+        if self.sslmode == "disable":
+            return False
+        mode = self.sslmode or "prefer"
+        if not certs_configured and mode in ("allow", "prefer", "require"):
+            return mode
+        return self._build_ssl_context(mode)
+
+    def _build_ssl_context(self, mode: str) -> ssl.SSLContext:
+        """Mirror libpq's verification rules for the given mode."""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = mode == "verify-full"
+        if mode in ("allow", "prefer"):
+            context.verify_mode = ssl.CERT_NONE
+        elif self.sslrootcert is not None:
+            context.load_verify_locations(cafile=str(self.sslrootcert))
+            context.verify_mode = ssl.CERT_REQUIRED
+        elif mode == "require":
+            # require encrypts but does not authenticate; only the verify-*
+            # modes promise the server is who it claims to be.
+            context.verify_mode = ssl.CERT_NONE
+        else:
+            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+            context.verify_mode = ssl.CERT_REQUIRED
+        if self.sslcert is not None:
+            password = self.sslpassword.get_secret_value() if self.sslpassword else None
+            context.load_cert_chain(
+                str(self.sslcert),
+                keyfile=str(self.sslkey) if self.sslkey else None,
+                password=password,
+            )
+        return context
 
     @model_validator(mode="after")
     def validate_db_url(self) -> "DatabaseSettings":
@@ -114,7 +361,7 @@ class DatabaseSettings(BaseSettings):
         return self
 
 
-class GeoIPSettings(BaseSettings):
+class GeoIPSettings(EnvOrFileSettings):
     """GeoIP database configuration settings."""
 
     # populate_by_name: account_id/license_key use MAXMINDDB_* validation
@@ -207,7 +454,7 @@ class GeoIPSettings(BaseSettings):
         return self
 
 
-class APISettings(BaseSettings):
+class APISettings(EnvOrFileSettings):
     """API server configuration settings."""
 
     model_config = SettingsConfigDict(env_prefix="API_", env_file=_env_file(), extra="ignore")
@@ -220,7 +467,7 @@ class APISettings(BaseSettings):
     )
 
 
-class LogSettings(BaseSettings):
+class LogSettings(EnvOrFileSettings):
     """Application logging configuration (files, rotation, level)."""
 
     model_config = SettingsConfigDict(env_prefix="LOG_", env_file=_env_file(), extra="ignore")
@@ -246,7 +493,7 @@ class LogSettings(BaseSettings):
     )
 
 
-class LogParserSettings(BaseSettings):
+class LogParserSettings(EnvOrFileSettings):
     """Log parser configuration settings."""
 
     model_config = SettingsConfigDict(env_prefix="LOGPARSER_", env_file=_env_file(), extra="ignore")
@@ -431,7 +678,7 @@ class LogParserSettings(BaseSettings):
         return value
 
 
-class AnalyticsSettings(BaseSettings):
+class AnalyticsSettings(EnvOrFileSettings):
     """Analytics and aggregation configuration settings.
 
     TimescaleDB handles retention via policies configured in lifecycle.py.
@@ -474,7 +721,7 @@ class AnalyticsSettings(BaseSettings):
 
 
 
-class SchedulerSettings(BaseSettings):
+class SchedulerSettings(EnvOrFileSettings):
     """APScheduler configuration for periodic background tasks."""
 
     model_config = SettingsConfigDict(env_prefix="SCHEDULER_", env_file=_env_file(), extra="ignore")
@@ -489,7 +736,7 @@ class SchedulerSettings(BaseSettings):
     )
 
 
-class MapSettings(BaseSettings):
+class MapSettings(EnvOrFileSettings):
     """Map presentation settings shared with the web client."""
 
     model_config = SettingsConfigDict(env_prefix="MAP_", env_file=_env_file(), extra="ignore")
@@ -583,7 +830,7 @@ class MapSettings(BaseSettings):
         return self
 
 
-class CrowdSecSettings(BaseSettings):
+class CrowdSecSettings(EnvOrFileSettings):
     """CrowdSec Local API integration settings.
 
     The integration is enabled when ``lapi_url`` and ``bouncer_api_key`` are
@@ -645,7 +892,7 @@ class CrowdSecSettings(BaseSettings):
         return self
 
 
-class ViteSettings(BaseSettings):
+class ViteSettings(EnvOrFileSettings):
     """Vite server configuration settings."""
 
     model_config = SettingsConfigDict(env_prefix="VITE_", env_file=_env_file(), extra="ignore")
@@ -681,7 +928,7 @@ class ViteSettings(BaseSettings):
     )
 
 
-class AppSettings(BaseSettings):
+class AppSettings(EnvOrFileSettings):
     """Application-level settings."""
 
     model_config = SettingsConfigDict(env_prefix="APP_", env_file=_env_file(), extra="ignore")
@@ -703,7 +950,7 @@ class AppSettings(BaseSettings):
     )
 
 
-class Settings(BaseSettings):
+class Settings(EnvOrFileSettings):
     """Main application settings.
     
     This class aggregates all configuration sections and provides

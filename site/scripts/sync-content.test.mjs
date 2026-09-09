@@ -35,6 +35,22 @@ test("unknown anchor fails loudly", () => {
   assert.throws(() => rewriteLinks("[x](#nope)", { anchors: {} }), /nope/);
 });
 
+test("rewrites the links docs pages use among themselves", () => {
+  const ctx = { anchors: { "multi-source-setup": "/docs/features/multi-source/" } };
+  const out = rewriteLinks(
+    "[a](deployment.md) [b](deployment.md#health) [c](../README.md#multi-source-setup)",
+    ctx,
+  );
+  assert.equal(
+    out,
+    "[a](/docs/operate/deployment/) [b](/docs/operate/deployment/#health) [c](/docs/features/multi-source/)",
+  );
+});
+
+test("unknown README anchor from a docs page fails loudly", () => {
+  assert.throws(() => rewriteLinks("[x](../README.md#nope)", { anchors: {} }), /nope/);
+});
+
 test("merges Quickstart and Docker image tags into one page", () => {
   const sections = [
     { title: "Quickstart", body: "q" },

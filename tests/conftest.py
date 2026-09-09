@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 import pytest
 
 # Tests must never read a developer's .env. Every settings section resolves
@@ -82,3 +84,33 @@ def refresh_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(scope="session")
+def ca_file(tmp_path_factory) -> Path:
+    """A throwaway self-signed CA, so TLS settings can be loaded for real."""
+    cryptography = pytest.importorskip("cryptography")
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "geometrikks-test-ca")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    path = tmp_path_factory.mktemp("tls") / "ca.pem"
+    path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    return path
