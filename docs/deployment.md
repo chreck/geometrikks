@@ -5,6 +5,11 @@ to turn. The canonical image is built from `Dockerfile` and published to GHCR;
 `docker-compose.dev.yml --profile prod` shows a working single-container
 setup.
 
+Pointing the container at a database you already run — connection string,
+TLS, credentials from files — is [External
+database](external-database.md); running it in a cluster is
+[Kubernetes](kubernetes.md).
+
 ## Runtime model
 
 The image runs Granian through the Litestar CLI:

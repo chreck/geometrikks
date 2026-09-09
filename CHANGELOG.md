@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- GeoMetrikks can run against a PostgreSQL/TimescaleDB you already have. `DB_CONNECTION_STRING` (or `DATABASE_URL`) carries the whole address in one string and wins over the individual `DB_*` variables; `DB_SSLMODE` with `DB_SSLROOTCERT`, `DB_SSLCERT`, `DB_SSLKEY` and `DB_SSLPASSWORD` configures TLS up to `verify-full`, and `DB_SERVER_SETTINGS` passes PostgreSQL startup parameters. `docker-compose.external-db.yml` starts the app without the bundled database, and `docs/external-database.md` covers what such a database must provide.
+- Every setting also reads from a file when `_FILE` is appended to its variable name (`DB_PASSWORD_FILE=/run/secrets/db_password`, `APP_ADMIN_PASSWORD_FILE=...`), which is how Docker secrets and Kubernetes secret volumes hand over credentials. The file wins over the plain variable, and an unreadable one fails startup naming the variable.
+- `docs/kubernetes.md`: manifests, probes, secret volumes, access-log sources and migration jobs for running the container in a cluster.
+
 ## [0.14.3] - 2026-09-07
 
 ### Added

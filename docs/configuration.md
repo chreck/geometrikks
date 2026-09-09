@@ -59,6 +59,13 @@ from real environment variables. It is read once at import time.
 | `DB_HOST` | `localhost` | Database host |
 | `DB_PORT` | `5432` | Database port |
 | `DB_DATABASE` | `geometrikks` | Database name |
+| `DB_CONNECTION_STRING` | - | Complete PostgreSQL connection string, e.g. postgresql://user:pass@db.example.com:5432/geometrikks?sslmode=require (DATABASE_URL is accepted as well). Every component it carries wins over the matching DB_* variable; libpq ssl parameters in the query populate the DB_SSL* settings and anything else becomes a PostgreSQL startup parameter. |
+| `DB_SSLMODE` | - | libpq TLS mode: disable, allow, prefer, require, verify-ca or verify-full. Unset means prefer (TLS when the server offers it, without verification). verify-ca and verify-full check the server certificate against DB_SSLROOTCERT, or the system trust store when no CA file is configured. |
+| `DB_SSLROOTCERT` | - | Path to the CA certificate that signs the server certificate |
+| `DB_SSLCERT` | - | Path to the client certificate for certificate authentication |
+| `DB_SSLKEY` | - | Path to the private key belonging to DB_SSLCERT |
+| `DB_SSLPASSWORD` | - | Passphrase protecting DB_SSLKEY, if it is encrypted |
+| `DB_SERVER_SETTINGS` | *(computed)* | PostgreSQL startup parameters as a JSON object, e.g. {"application_name": "geometrikks"}. Unrecognised query parameters of DB_CONNECTION_STRING are merged in; explicit entries win. |
 | `DB_DROP_ON_STARTUP` | `false` | Drop all tables on startup (development only) |
 | `DB_MIGRATE_ON_STARTUP` | `true` | Run alembic migrations automatically at app startup. Disable when migrations run as a separate deployment step (`litestar database upgrade`); the app then expects the schema to already be at head and fails startup if it is not usable |
 | `DB_STARTUP_WAIT_SECONDS` | `30` | How long startup waits for the database before serving in degraded mode. 0 probes once. The app keeps re-probing in the background after this window and recovers on its own when the database answers. |

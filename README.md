@@ -100,6 +100,12 @@ $EDITOR .env      # set APP_ADMIN_PASSWORD, MaxMind key, CARTO key, log path
 docker compose up -d
 ```
 
+That compose file brings its own TimescaleDB. To use a database you
+already run, take `docker-compose.external-db.yml` instead and set
+`DB_CONNECTION_STRING` (or the individual `DB_*` variables) — see
+[External database](docs/external-database.md). For a cluster, see
+[Kubernetes](docs/kubernetes.md).
+
 Open http://localhost:8000 and log in with `APP_ADMIN_USER` /
 `APP_ADMIN_PASSWORD`. When `MAXMINDDB_USER_ID` and `MAXMINDDB_LICENSE_KEY`
 are set, the app downloads the GeoLite2 database at startup and refreshes
@@ -949,6 +955,11 @@ variable and its default, see
 Set `GEOMETRIKKS_ENV_FILE` to load a different `.env` path, or to an empty
 value to disable dotenv loading and configure through real environment
 variables only.
+
+Every variable also reads from a file when you append `_FILE` to its name
+(`DB_PASSWORD_FILE=/run/secrets/db_password`), which is how Docker secrets
+and Kubernetes secret volumes deliver credentials without putting them in
+the environment. The file wins if both are set.
 
 ### PUID and PGID
 

@@ -1029,7 +1029,7 @@ async def test_recovery_shutdown_waits_for_migration_worker(monkeypatch, worker_
     worker_finished = threading.Event()
     loop = asyncio.get_running_loop()
 
-    def upgrade(database_url):
+    def upgrade(database_url, connect_args=None):
         loop.call_soon_threadsafe(worker_started.set)
         try:
             release_worker.wait()

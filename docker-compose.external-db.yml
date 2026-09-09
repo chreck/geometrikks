@@ -1,0 +1,51 @@
+# GeoMetrikks against a database you already run. Quickstart:
+#   mkdir geometrikks && cd geometrikks
+#   curl -LO https://raw.githubusercontent.com/GilbN/geometrikks/main/docker-compose.external-db.yml
+#   curl -Lo .env https://raw.githubusercontent.com/GilbN/geometrikks/main/.env.example
+#   $EDITOR .env      # database address, APP_ADMIN_PASSWORD, MaxMind key, log path
+#   docker compose -f docker-compose.external-db.yml up -d
+#
+# The database must offer the timescaledb, timescaledb_toolkit and postgis
+# extensions; see docs/external-database.md for what that rules out and how
+# to configure TLS. Use docker-compose.yml instead to get a TimescaleDB
+# container alongside the app.
+services:
+  app:
+    image: ghcr.io/gilbn/geometrikks:latest
+    restart: unless-stopped
+    hostname: geometrikks
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # Everything else comes from .env: either DB_CONNECTION_STRING, or
+      # DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_DATABASE, plus DB_SSLMODE.
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - geoip_data:/app/data/geoip
+      - ${ACCESS_LOG_DIR:-${NGINX_LOG_DIR:-/var/log/nginx}}:/var/log/access:ro
+      # Exposes the application log and login.log on the host for tools like
+      # CrowdSec/fail2ban, and persists them across container recreation.
+      - ./logs:/app/logs
+      # A CA bundle or client certificate for DB_SSLROOTCERT/DB_SSLCERT:
+      #- ./tls:/etc/geometrikks/tls:ro
+    # Granian is started with --workers-kill-timeout 15; the default 10s
+    # stop timeout SIGKILLs the container mid-teardown and drops the
+    # ingestion batch still in flight.
+    stop_grace_period: 20s
+
+    # Docker secrets instead of environment variables: mount the secret and
+    # point the *_FILE variant of the variable at it.
+    #secrets:
+    #  - db_password
+    #environment:
+    #  DB_PASSWORD_FILE: /run/secrets/db_password
+
+#secrets:
+#  db_password:
+#    file: ./secrets/db_password
+
+volumes:
+  geoip_data:
