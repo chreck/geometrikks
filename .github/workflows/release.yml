@@ -62,7 +62,10 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/gilbn/geometrikks
+          # Owner of the repository being built, so a fork publishes to its
+          # own GHCR namespace instead of failing on the upstream one.
+          # metadata-action lowercases the image name for us.
+          images: ghcr.io/${{ github.repository_owner }}/geometrikks
           # latest only on stable (non-prerelease) semver tags
           # develop is a moving tag that always points at the newest dev release
           tags: |
