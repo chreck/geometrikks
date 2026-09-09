@@ -35,7 +35,10 @@ jobs:
               echo "Develop releases must be tagged at the current develop HEAD."
               exit 1
             }
-          elif [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          elif [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9]+\.[0-9]+)?$ ]]; then
+            # Plain vX.Y.Z is the stable release. vX.Y.Z-<label>.N is a fork's
+            # own build of the same main (v0.14.3-chreck.1); it publishes only
+            # that one image tag, never latest.
             expected_commit="$(git rev-parse origin/main)"
             [[ "${tag_commit}" == "${expected_commit}" ]] || {
               echo "Stable releases must be tagged at the current main HEAD."
@@ -43,7 +46,7 @@ jobs:
             }
           else
             echo "Invalid release tag: ${tag}"
-            echo "Use vX.Y.Z-dev.N on develop or vX.Y.Z on main."
+            echo "Use vX.Y.Z-dev.N on develop, or vX.Y.Z / vX.Y.Z-<label>.N on main."
             exit 1
           fi
 
